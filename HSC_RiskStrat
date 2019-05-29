@@ -1,0 +1,96 @@
+# comparison of ASC cohort and GP registered cohorts risk stratification scores
+
+library(tidyverse)
+library(RODBC)
+library(ggridges)
+
+con <- odbcConnect("RLLLB")
+
+# risk of emergency admission scores - all or most recent
+Risk <- sqlQuery(con, 
+"SELECT *
+FROM dbo.Risk")
+# WHERE RiskCalculationDate = 20181231")
+
+# disease register table
+MPI_DR <- sqlQuery(con, 
+"SELECT * 
+FROM NewModelNewDR
+WHERE CalculationDate = 20181231")
+
+CarePackages <- sqlQuery(con,
+"SELECT *
+FROM [dbo].[mccCare Packages]")
+#View(CarePackages)
+
+HomecareHours <- sqlQuery(con,
+"SELECT *
+FROM [dbo].[mccHomeCareHours]")
+#View(HomecareHours)
+
+Demographics <- sqlQuery(con, 
+"SELECT * 
+From [dbo].[mccDemographics]")
+#View(Demographics)
+
+Risk %>%
+filter(RiskCalculationDate == "20181231") %>%
+group_by(IsTop5PercentCityWide) %>%
+summarise(People = n())
+
+ASCCohort <- Demographics %>%
+left_join(CarePackages, by = c("MiCARE Number" = "MiCARE Number")) %>%
+left_join(Risk, by = c("NHS Number" = "PatientId")) %>%
+filter(RiskCalculationDate == 20181231) %>%
+mutate(CarePackage = if_else(is.na(`Service Type (Package of Care)`),0,1),
+CurrentHomeCare = if_else(`Service Type (Package of Care)` == "Home Care" & is.na(`Service End Date`) |
+`Service Type (Package of Care)` == "Home Care." & is.na(`Service End Date`), 1, 0),
+CurrentResi = if_else(`Service Type (Package of Care)` == "Permanent Residential Care" & is.na(`Service End Date`), 1, 0),
+CurrentNursing = if_else(`Service Type (Package of Care)` == "Permanent Nursing Care" & is.na(`Service End Date`), 1, 0))
+View(ASCCohort)
+
+
+ASCCohortUni <- ASCCohort %>%
+select(`NHS Number`, `MiCARE Number`, Gender, Age, LSOA, `Service Type (Package of Care)`,
+`Earliest Homecare Service Start Date`, `Service Start Date`, RiskOfEmergencyAdmission,
+`Service End Date`, CarePackage, CurrentHomeCare, CurrentResi, CurrentNursing) %>%
+group_by(`NHS Number`, `MiCARE Number`) %>%
+summarise(EarlistServiceStart = min(`Service Start Date`, na.rm = TRUE),
+LatestServiceEnd = max(`Service End Date`, na.rm = TRUE),
+EarlistHCStart = min(`Earliest Homecare Service Start Date`, na.rm = TRUE),
+RiskScore = mean(RiskOfEmergencyAdmission, na.rm = TRUE),
+NumberCarePackages = sum(CarePackage, na.rm = TRUE),
+HomeCare = sum(CurrentHomeCare, na.rm = TRUE),
+ResiCare = sum(CurrentResi, na.rm = TRUE),
+NursingCare = sum(CurrentNursing, na.rm = TRUE)) %>%
+mutate(RiskPRank = percent_rank(RiskScore),
+ASCCohort = 1,
+ASCSupport = if_else(NursingCare >= 1, 4, if_else(ResiCare >= 1, 3,
+if_else(HomeCare >= 1, 2, if_else(NumberCarePackages >= 1, 1, 0))))) %>%
+ungroup() %>%
+data.frame()
+
+GPReg_Risk <- Risk %>%
+filter(RiskCalculationDate == 20181231) %>%
+left_join(ASCCohortUni, by = c("PatientId" = "NHS Number")) %>%
+select(PatientId, RiskOfEmergencyAdmission, Locality, NumberCarePackages) %>%
+mutate(ASCCP = if_else(NumberCarePackages >= 1, 1, 0)) %>%
+write_csv("RiskScores.csv")
+
+GPReg_Risk %>%
+ggplot(aes(RiskOfEmergencyAdmission, factor(ASCCP))) +
+geom_point(position = "jitter", alpha = 0.2)
+
+Risk %>%
+filter(RiskCalculationDate == 20181231) %>%
+ggplot(aes(RiskOfEmergencyAdmission)) +
+geom_histogram()
+
+GPReg_Risk %>%
+ggplot(aes(RiskOfEmergencyAdmission)) +
+geom_density()
+
+ASCCohortUni %>%
+ggplot(aes(RiskScore, ASCSupport, group=ASCSupport)) +
+geom_density_ridges()
+
